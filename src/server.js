@@ -1198,6 +1198,201 @@ app.get("/setup/api/export", requireSetupAuth, async (_req, res) => {
   }
 });
 
+app.post(
+  "/setup/api/import",
+  requireSetupAuth,
+  express.raw({ type: "application/zip", limit: "500mb" }),
+  async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Request body must be a ZIP payload (Content-Type: application/zip)." });
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const tmpZip = path.join(os.tmpdir(), `openclaw-import-${timestamp}.zip`);
+
+    const cleanup = () => {
+      try { fs.rmSync(tmpZip, { force: true }); } catch {}
+    };
+
+    try {
+      fs.writeFileSync(tmpZip, req.body, { mode: 0o600 });
+      log.info("import", `received ${req.body.length} bytes -> ${tmpZip}`);
+
+      const verify = await runCmd("unzip", ["-tqq", "-P", SETUP_PASSWORD, tmpZip]);
+      if (verify.code !== 0) {
+        log.warn("import", `integrity check failed: ${verify.output.trim()}`);
+        cleanup();
+        return res.status(400).json({
+          ok: false,
+          error: "Archive password does not match or archive is corrupt.",
+        });
+      }
+
+      const list = await runCmd("unzip", ["-Z1", "-P", SETUP_PASSWORD, tmpZip]);
+      if (list.code !== 0) {
+        cleanup();
+        return res.status(400).json({
+          ok: false,
+          error: "Could not read archive contents.",
+          output: list.output,
+        });
+      }
+
+      const entries = list.output
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      const allowedPrefixes = [STATE_DIR, WORKSPACE_DIR]
+        .map((p) => p.replace(/^\/+/, "").replace(/\/+$/, ""))
+        .filter(Boolean);
+
+      const unsafe = entries.filter((entry) => {
+        if (entry.startsWith("/")) return true;
+        if (entry.split("/").some((seg) => seg === "..")) return true;
+        return !allowedPrefixes.some(
+          (prefix) => entry === prefix || entry.startsWith(prefix + "/"),
+        );
+      });
+
+      if (unsafe.length > 0) {
+        log.warn("import", `rejected unsafe entries: ${unsafe.slice(0, 3).join(", ")}${unsafe.length > 3 ? ` (+${unsafe.length - 3} more)` : ""}`);
+        cleanup();
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Archive contains entries outside the expected directories. Import aborted; state is untouched.",
+          rejectedSample: unsafe.slice(0, 5),
+        });
+      }
+
+      const zinfo = await runCmd("unzip", ["-Z", "-P", SETUP_PASSWORD, tmpZip]);
+      if (zinfo.code !== 0) {
+        cleanup();
+        return res.status(400).json({
+          ok: false,
+          error: "Could not inspect archive metadata.",
+          output: zinfo.output,
+        });
+      }
+      const modeRe = /^([a-z-])[-rwxsStTlL]{9}\s/;
+      const specialEntries = zinfo.output
+        .split("\n")
+        .map((line) => {
+          const m = modeRe.exec(line);
+          return m && m[1] !== "-" && m[1] !== "d" ? m[1] : null;
+        })
+        .filter(Boolean);
+      if (specialEntries.length > 0) {
+        log.warn("import", `rejected non-regular entries (types: ${[...new Set(specialEntries)].join(",")})`);
+        cleanup();
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Archive contains symbolic links or special files, which could redirect extraction outside the expected directories. Import aborted; state is untouched.",
+        });
+      }
+
+      if (gatewayStarting) {
+        log.info("import", "waiting for in-flight gateway start to settle");
+        try { await gatewayStarting; } catch (err) {
+          log.warn("import", `in-flight start rejected: ${err.message}`);
+        }
+      }
+
+      intentionalRestart = true;
+      if (gatewayProc) {
+        log.info("import", "stopping gateway before extract");
+        try {
+          gatewayProc.kill("SIGTERM");
+        } catch (err) {
+          log.warn("import", `kill error: ${err.message}`);
+        }
+        await sleep(750);
+        gatewayProc = null;
+      }
+      await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
+      gatewayRestartCount = 0;
+
+      for (const dir of [STATE_DIR, WORKSPACE_DIR]) {
+        if (!fs.existsSync(dir)) continue;
+        for (const entry of fs.readdirSync(dir)) {
+          try {
+            fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
+          } catch (err) {
+            log.warn("import", `could not remove ${path.join(dir, entry)}: ${err.message}`);
+          }
+        }
+      }
+      log.info("import", "wiped existing state; extracting archive");
+
+      fs.mkdirSync(STATE_DIR, { recursive: true });
+      fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+
+      const extract = await runCmd("unzip", ["-P", SETUP_PASSWORD, "-o", "-qq", tmpZip, "-d", "/"]);
+      if (extract.code !== 0) {
+        intentionalRestart = false;
+        log.error("import", `extract failed: ${extract.output.trim()}`);
+        cleanup();
+        return res.status(500).json({
+          ok: false,
+          error:
+            "Extract failed. State directories have been cleared; re-run import or restore from another backup.",
+          output: extract.output,
+        });
+      }
+
+      try {
+        const tokenPath = path.join(STATE_DIR, "gateway.token");
+        fs.writeFileSync(tokenPath, OPENCLAW_GATEWAY_TOKEN, { encoding: "utf8", mode: 0o600 });
+      } catch (err) {
+        log.warn("import", `could not pin gateway.token after import: ${err.message}`);
+      }
+
+      intentionalRestart = false;
+
+      if (!isConfigured()) {
+        log.error("import", `archive did not contain a valid openclaw.json at ${configPath()}`);
+        cleanup();
+        return res.status(422).json({
+          ok: false,
+          error:
+            "Archive extracted but did not contain openclaw.json. The deployment is now unconfigured; re-run onboarding or import a valid export.",
+          entries: entries.length,
+        });
+      }
+
+      let gatewayReady = false;
+      let gatewayError = null;
+      try {
+        const result = await ensureGatewayRunning();
+        gatewayReady = result?.ok === true;
+      } catch (err) {
+        gatewayError = err.message;
+        log.error("import", `gateway did not start after import: ${err.message}`);
+      }
+
+      log.info("import", `complete: ${entries.length} entries, gatewayReady=${gatewayReady}`);
+      cleanup();
+      const status = gatewayReady ? 200 : 500;
+      return res.status(status).json({
+        ok: gatewayReady,
+        entries: entries.length,
+        bytes: req.body.length,
+        gatewayReady,
+        ...(gatewayError ? { error: `Imported, but gateway failed to start: ${gatewayError}` } : {}),
+      });
+    } catch (err) {
+      intentionalRestart = false;
+      cleanup();
+      log.error("import", `error: ${err.message}`);
+      return res.status(500).json({ ok: false, error: `Import failed: ${err.message}` });
+    }
+  },
+);
+
 app.get("/logs", requireSetupAuth, (_req, res) => {
   res.sendFile(path.join(process.cwd(), "src", "public", "logs.html"));
 });

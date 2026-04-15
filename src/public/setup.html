@@ -40,6 +40,9 @@
       tuiEnabled: false,
       exporting: false,
       showExportInfo: false,
+      importing: false,
+      showImportConfirm: false,
+      pendingImportFile: null,
       showDevicesModal: false,
       devicesLoading: false,
       devices: [],
@@ -266,6 +269,63 @@
         }
       },
 
+      onImportFileSelected(event) {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+        this.pendingImportFile = file;
+        this.showImportConfirm = true;
+      },
+
+      cancelImport() {
+        this.pendingImportFile = null;
+        this.showImportConfirm = false;
+        const input = document.getElementById('import-file-input');
+        if (input) input.value = '';
+      },
+
+      async confirmImport() {
+        const file = this.pendingImportFile;
+        this.showImportConfirm = false;
+        if (!file) return;
+
+        this.importing = true;
+        this.log = 'Uploading ' + file.name + ' (' + file.size + ' bytes)...\n';
+
+        try {
+          const res = await fetch('/setup/api/import', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/zip' },
+            body: file,
+          });
+          const text = await res.text();
+          let j;
+          try { j = JSON.parse(text); } catch (_e) { j = { error: text }; }
+
+          if (!res.ok || !j.ok) {
+            this.log += '✗ Import failed: ' + (j.error || j.output || text) + '\n';
+            if (j.rejectedSample && j.rejectedSample.length) {
+              this.log += '  Rejected entries: ' + j.rejectedSample.join(', ') + '\n';
+            }
+            return;
+          }
+
+          this.log += '✓ Import complete: ' + j.entries + ' entries, ' + j.bytes + ' bytes\n';
+          this.log += j.gatewayReady
+            ? '✓ Gateway restarted successfully\n'
+            : '⚠ Gateway did not become ready; check logs\n';
+          this.log += 'Refreshing status...\n';
+          await this.refreshStatus();
+        } catch (e) {
+          this.log += '✗ Import error: ' + String(e) + '\n';
+        } finally {
+          this.importing = false;
+          this.pendingImportFile = null;
+          const input = document.getElementById('import-file-input');
+          if (input) input.value = '';
+        }
+      },
+
       async openDevicesModal() {
         this.showDevicesModal = true;
         await this.loadDevices();
@@ -452,6 +512,24 @@
               <span x-show="exporting" style="display:inline-flex;align-items:center;justify-content:center;gap:0.5rem">
                 <svg class="spinner-inline" fill="none" viewBox="0 0 24 24"><circle style="opacity:0.25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path style="opacity:0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                 Exporting...
+              </span>
+            </button>
+          </div>
+
+          <div class="action-card action-violet">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+              </div>
+              <span class="action-title">Import Data</span>
+            </div>
+            <p class="action-desc">Restore config and workspace from a previously exported ZIP. Replaces all current data.</p>
+            <input id="import-file-input" type="file" accept=".zip,application/zip" @change="onImportFileSelected($event)" style="display:none" />
+            <button @click="document.getElementById('import-file-input').click()" :disabled="loading || importing || exporting" class="action-btn">
+              <span x-show="!importing">Import Data</span>
+              <span x-show="importing" style="display:inline-flex;align-items:center;justify-content:center;gap:0.5rem">
+                <svg class="spinner-inline" fill="none" viewBox="0 0 24 24"><circle style="opacity:0.25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path style="opacity:0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                Importing...
               </span>
             </button>
           </div>
@@ -770,6 +848,24 @@
           <code class="code-block">7z x -pYOUR_PASSWORD openclaw-export-*.zip</code>
         </div>
         <button @click="showExportInfo = false" class="btn-close-full">Close</button>
+      </div>
+    </div>
+
+    <div x-show="showImportConfirm" x-cloak class="modal-overlay" @click.self="cancelImport()">
+      <div class="modal-card modal-md">
+        <h3 class="modal-title mb-4">Confirm Import</h3>
+        <p class="text-sm mb-4">
+          You're about to import
+          <strong x-text="pendingImportFile ? pendingImportFile.name : ''"></strong>.
+        </p>
+        <p class="text-sm text-muted mb-4">
+          This will <strong>erase all current config and workspace data</strong> and replace it with the archive contents.
+          The gateway will restart automatically. If extraction fails partway, state may be left empty — keep a backup ready.
+        </p>
+        <div class="btn-pair">
+          <button @click="confirmImport()" class="btn btn-primary">Import and Replace</button>
+          <button @click="cancelImport()" class="btn btn-close-full" style="margin-top:0">Cancel</button>
+        </div>
       </div>
     </div>
 
