@@ -4,9 +4,13 @@ set -e
 chown -R openclaw:openclaw /data
 chmod 700 /data
 
-# Allow the openclaw user to write to its global node_modules so
-# config-driven auto-update (update.auto.enabled in openclaw.json) can apply
-# package upgrades at runtime.
+# Allow the openclaw user to manage its own global npm package so that
+# config-driven auto-update (update.auto.enabled in openclaw.json) and the
+# boot-time `npm i -g openclaw@latest` below can both succeed without root.
+# - /usr/local/lib/node_modules: needed for atomic rename during reinstall
+# - /usr/local/lib/node_modules/openclaw: package directory itself
+# - /usr/local/bin: needed for the openclaw bin-symlink update
+chown openclaw:openclaw /usr/local/lib/node_modules /usr/local/bin 2>/dev/null || true
 chown -R openclaw:openclaw /usr/local/lib/node_modules/openclaw 2>/dev/null || true
 
 # Bring the openclaw CLI to the latest stable on every (re)deploy so the
