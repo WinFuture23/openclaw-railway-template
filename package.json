@@ -8,7 +8,8 @@
   "scripts": {
     "dev": "node src/server.js",
     "start": "node src/server.js",
-    "lint": "node -c src/server.js",
+    "lint": "npx --yes @biomejs/biome@2.2.0 check src",
+    "lint:fix": "npx --yes @biomejs/biome@2.2.0 check --write src",
     "test": "node --test src/*.test.mjs"
   },
   "dependencies": {
