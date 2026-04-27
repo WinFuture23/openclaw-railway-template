@@ -1,4 +1,4 @@
-FROM node:22-bookworm
+FROM node:24-bookworm
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -10,6 +10,11 @@ RUN apt-get update \
     python3 \
     build-essential \
     zip \
+    libnss3 libnspr4 \
+    libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 \
+    libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    libasound2 libcups2 libdbus-1-3 \
+    libgbm1 libxkbcommon0 \
   && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g openclaw@2026.4.23 clawhub@latest
