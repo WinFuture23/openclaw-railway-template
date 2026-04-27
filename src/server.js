@@ -1469,13 +1469,17 @@ const server = app.listen(PORT, () => {
 
   if (isConfigured()) {
     (async () => {
-      try {
-        log.info("wrapper", "running openclaw doctor --fix...");
-        const dr = await runCmd(OPENCLAW_NODE, clawArgs(["doctor", "--fix"]));
-        log.info("wrapper", `doctor --fix exit=${dr.code}`);
-        if (dr.output) log.info("wrapper", dr.output);
-      } catch (err) {
-        log.warn("wrapper", `doctor --fix failed: ${err.message}`);
+      if (process.env.OPENCLAW_RUN_DOCTOR_ON_BOOT === "1") {
+        try {
+          log.info("wrapper", "running openclaw doctor --fix (OPENCLAW_RUN_DOCTOR_ON_BOOT=1)...");
+          const dr = await runCmd(OPENCLAW_NODE, clawArgs(["doctor", "--fix"]));
+          log.info("wrapper", `doctor --fix exit=${dr.code}`);
+          if (dr.output) log.info("wrapper", dr.output);
+        } catch (err) {
+          log.warn("wrapper", `doctor --fix failed: ${err.message}`);
+        }
+      } else {
+        log.info("wrapper", "skipping boot-time doctor (set OPENCLAW_RUN_DOCTOR_ON_BOOT=1 to enable)");
       }
       await ensureGatewayRunning();
     })().catch((err) => {

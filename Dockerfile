@@ -18,7 +18,7 @@ RUN apt-get update \
     libgbm1 libxkbcommon0 \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g openclaw@2026.4.23 clawhub@latest
+RUN npm install -g openclaw@2026.4.25 clawhub@latest
 
 WORKDIR /app
 
@@ -46,7 +46,7 @@ ENV OPENCLAW_ENTRY=/usr/local/lib/node_modules/openclaw/dist/entry.js
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD curl -f http://localhost:8080/setup/healthz || exit 1
+  CMD curl -f http://localhost:8080/healthz || exit 1
 
 USER root
 ENTRYPOINT ["./entrypoint.sh"]
