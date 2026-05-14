@@ -5,6 +5,7 @@
   "engines": {
     "node": ">=24"
   },
+  "packageManager": "pnpm@10.33.4",
   "scripts": {
     "dev": "node src/server.js",
     "start": "node src/server.js",
